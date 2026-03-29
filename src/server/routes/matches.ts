@@ -1,0 +1,712 @@
+import express from "express";
+import axios from "axios";
+import iconv from "iconv-lite";
+import * as cheerio from "cheerio";
+import { createHash } from "crypto";
+import { db } from "../db.js";
+import { logAdminAction } from "../adminAudit.js";
+import { authenticate, requireAdmin } from "./auth.js";
+import { scrapeMatches, scrapeCba, scrapeNba, scrapeKbl, scrapeNbl, scrapeAllCategories } from "../scraper.js";
+import { compareMatchesBusinessAsc, parseMatchKickoff } from "../../lib/matchTime.js";
+import { getEnabledFootballLeagues, getFootballLeagueScopeStats } from "../footballLeagues.js";
+
+const router = express.Router();
+
+let activeScrapeJob: { startedAt: number; scope: string; date: string } | null = null;
+const remoteTeamPoolCache = new Map<string, { expiresAt: number; teams: string[] }>();
+
+function normalizeIdentityPart(value: unknown) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function buildMatchVisibleIdentity(match: any) {
+  return [
+    normalizeIdentityPart(match.category || "足球"),
+    normalizeIdentityPart(match.match_date),
+    normalizeIdentityPart(match.kickoff_time),
+    normalizeIdentityPart(match.league_name),
+    normalizeIdentityPart(match.home_team),
+    normalizeIdentityPart(match.away_team),
+  ].join("|");
+}
+
+function choosePreferredVisibleMatch(current: any, incoming: any) {
+  const currentUpdated = new Date(current?.updated_at || 0).getTime();
+  const incomingUpdated = new Date(incoming?.updated_at || 0).getTime();
+  if (incomingUpdated !== currentUpdated) return incomingUpdated > currentUpdated ? incoming : current;
+
+  const currentOpen = Number(Boolean(current?.is_open));
+  const incomingOpen = Number(Boolean(incoming?.is_open));
+  if (incomingOpen !== currentOpen) return incomingOpen > currentOpen ? incoming : current;
+
+  const currentId = Number(current?.id || 0);
+  const incomingId = Number(incoming?.id || 0);
+  return incomingId > currentId ? incoming : current;
+}
+
+function dedupeVisibleMatches(rows: any[]) {
+  const map = new Map<string, any>();
+  for (const row of rows || []) {
+    const key = buildMatchVisibleIdentity(row);
+    const existing = map.get(key);
+    map.set(key, existing ? choosePreferredVisibleMatch(existing, row) : row);
+  }
+  return [...map.values()];
+}
+
+function deriveDefaultApplyDeadline(match: { match_date?: string | null; kickoff_time?: string | null }) {
+  const kickoff = parseMatchKickoff(match.match_date, match.kickoff_time);
+  if (!kickoff) return null;
+  return new Date(kickoff.getTime() - 30 * 60 * 1000).toISOString();
+}
+
+function cleanText(value: string) {
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .replace(/\[[^\]]+\]/g, "")
+    .trim();
+}
+
+function normalizeFootballMatchDate(dateStr: string, kickoffTime: string) {
+  const match = String(kickoffTime || "").match(/(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})/);
+  if (!match) return dateStr;
+
+  const sourceYear = Number(dateStr.slice(0, 4));
+  const sourceMonth = Number(dateStr.slice(4, 6));
+  let year = sourceYear;
+  const month = Number(match[1]);
+  const day = Number(match[2]);
+
+  if (sourceMonth === 12 && month === 1) year += 1;
+  else if (sourceMonth === 1 && month === 12) year -= 1;
+
+  return `${year}${String(month).padStart(2, "0")}${String(day).padStart(2, "0")}`;
+}
+
+function shiftDateYmd(dateStr: string, offsetDays: number) {
+  const year = Number(dateStr.slice(0, 4));
+  const month = Number(dateStr.slice(4, 6));
+  const day = Number(dateStr.slice(6, 8));
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  dt.setUTCDate(dt.getUTCDate() + offsetDays);
+  return `${dt.getUTCFullYear()}${String(dt.getUTCMonth() + 1).padStart(2, "0")}${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+
+function buildStableSourceMatchKey(match: {
+  match_date?: string | null;
+  kickoff_time?: string | null;
+  league_name?: string | null;
+  home_team?: string | null;
+  away_team?: string | null;
+}) {
+  const date = String(match.match_date || "").trim();
+  const time = String(match.kickoff_time || "").trim();
+  const league = String(match.league_name || "").trim();
+  const home = String(match.home_team || "").trim();
+  const away = String(match.away_team || "").trim();
+  const identity = `${date}|${time}|${league}|${home}|${away}`;
+  return `stable_${createHash("sha1").update(identity).digest("hex")}`;
+}
+
+async function getFootballImportantRows(dateStr: string) {
+  const sourceDates = Array.from(new Set([shiftDateYmd(dateStr, -1), dateStr]));
+  const rows: Array<{ source_match_key: string; league_name: string }> = [];
+
+  for (const sourceDate of sourceDates) {
+    const url = `https://bf.titan007.com/football/Next_${sourceDate}.htm`;
+    const response = await axios.get<ArrayBuffer>(url, {
+      timeout: 15000,
+      responseType: "arraybuffer",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        Referer: "https://bf.titan007.com/",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+      },
+    });
+
+    const html = iconv.decode(Buffer.from(response.data), "gb18030");
+    const importantMatch = html.match(/importantSclass\s*=\s*"([^"]*)"/);
+    const importantLeagueIds = new Set(
+      String(importantMatch?.[1] || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+    const enabledLeagueNames = new Set(getEnabledFootballLeagues());
+    const useLeagueNameFallback = importantLeagueIds.size === 0;
+    const $ = cheerio.load(html);
+
+    $("table tr[id^='tr1_']").each((_, el) => {
+      const leagueId = String($(el).attr("name") || "").split(",")[0].trim();
+
+      const cells = $(el).children("td");
+      if (cells.length < 6) return;
+
+      const leagueName = cleanText(cells.eq(0).text());
+      const allowedByImportant = Boolean(leagueId && importantLeagueIds.has(leagueId));
+      const allowedByFallback = Boolean(useLeagueNameFallback && enabledLeagueNames.has(leagueName));
+      if (!allowedByImportant && !allowedByFallback) return;
+
+      const kickoffTime = cleanText(cells.eq(1).text());
+      const matchDate = normalizeFootballMatchDate(sourceDate, kickoffTime);
+      if (matchDate !== dateStr) return;
+
+      const homeCell = cells.eq(3).clone();
+      homeCell.find("span[name='order'], font, img").remove();
+      const homeTeam = cleanText(homeCell.text());
+      const awayCell = cells.eq(5).clone();
+      awayCell.find("span[name='order'], font, img").remove();
+      const awayTeam = cleanText(awayCell.text());
+      if (!leagueName || !homeTeam || !awayTeam) return;
+
+      rows.push({
+        source_match_key: buildStableSourceMatchKey({
+          match_date: matchDate,
+          kickoff_time: kickoffTime,
+          league_name: leagueName,
+          home_team: homeTeam,
+          away_team: awayTeam,
+        }),
+        league_name: leagueName,
+      });
+    });
+  }
+
+  return rows;
+}
+
+function buildBasketballSeason(date = new Date()) {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + 1;
+  const startYear = month >= 7 ? year : year - 1;
+  const endYear = startYear + 1;
+  return `${String(startYear).slice(2)}-${String(endYear).slice(2)}`;
+}
+
+function getDbTeamsByCategory(category: string) {
+  const rows = db.prepare(`
+    SELECT DISTINCT team
+    FROM (
+      SELECT TRIM(home_team) AS team
+      FROM matches
+      WHERE category = ? AND home_team IS NOT NULL AND TRIM(home_team) <> ''
+      UNION
+      SELECT TRIM(away_team) AS team
+      FROM matches
+      WHERE category = ? AND away_team IS NOT NULL AND TRIM(away_team) <> ''
+    )
+    WHERE team IS NOT NULL AND TRIM(team) <> ''
+    ORDER BY team COLLATE NOCASE ASC
+  `).all(category, category) as Array<{ team: string }>;
+
+  return rows.map((row) => row.team);
+}
+
+const TITAN_REMOTE_JS_FORBIDDEN = /\b(?:require|process|global|window|document|Function|eval|fetch|XMLHttpRequest|WebSocket|import|export)\b/;
+
+function parseJsArrayLiteral(text: string, varName: string): any[] {
+  const BS = String.fromCharCode(92);
+  const pattern = new RegExp("(?:var|let|const)?" + BS + "s*" + varName + BS + "s*=" + BS + "s*(" + BS + "[)", "s");
+  const startMatch = pattern.exec(text);
+  if (!startMatch) return [];
+  const startIdx = startMatch.index + startMatch[0].length - 1;
+  let depth = 0;
+  let endIdx = startIdx;
+  for (let i = startIdx; i < text.length; i++) {
+    if (text[i] === "[") depth++;
+    else if (text[i] === "]") { depth--; if (depth === 0) { endIdx = i + 1; break; } }
+  }
+  const jsonCandidate = text
+    .slice(startIdx, endIdx)
+    .replace(/'/g, '"')
+    .replace(/,\s*]/g, "]")
+    .replace(/,\s*}/g, "}")
+    .replace(/([{,]\s*)([a-zA-Z_]\w*)\s*:/g, '$1"$2":');
+  try { return JSON.parse(jsonCandidate); } catch { return []; }
+}
+
+function assertSafeTitanTeamPayload(payload: string) {
+  const text = String(payload || "");
+  if (!text.trim()) throw new Error("Titan team payload is empty");
+  if (text.length > 1_000_000) throw new Error("Titan team payload too large");
+  if (TITAN_REMOTE_JS_FORBIDDEN.test(text)) throw new Error("Titan team payload contains forbidden tokens");
+  if (!/\barrTeam\b/.test(text)) throw new Error("Titan team payload missing arrTeam");
+}
+
+async function getRemoteTitanBasketballTeams(category: string, leagueId: number) {
+  const season = buildBasketballSeason();
+  const cacheKey = `${category}:${season}`;
+  const cached = remoteTeamPoolCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.teams;
+  }
+
+  const year = new Date().getUTCFullYear();
+  const month = new Date().getUTCMonth() + 1;
+  const url = `https://nba.titan007.com/jsData/matchResult/${season}/l${leagueId}_1_${year}_${month}.js?version=${year}${String(month).padStart(2, "0")}1700`;
+  const response = await axios.get<string>(url, {
+    timeout: 15000,
+    responseType: "text",
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      Referer: "https://nba.titan007.com/",
+      Accept: "*/*",
+      "Accept-Language": "zh-CN,zh;q=0.9",
+    },
+  });
+
+  const payload = String(response.data || "");
+  assertSafeTitanTeamPayload(payload);
+  const arrTeam = parseJsArrayLiteral(payload, "arrTeam");
+  const teams = Array.from(new Set((arrTeam || []).map((row: any) => String(row?.[1] || "").trim()).filter(Boolean)))
+    .sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+
+  if (teams.length > 0) {
+    remoteTeamPoolCache.set(cacheKey, {
+      expiresAt: Date.now() + 30 * 60 * 1000,
+      teams,
+    });
+  }
+
+  return teams;
+}
+
+async function runScrapeWithLock(scope: string, date: string, runner: () => Promise<any>) {
+  if (activeScrapeJob) {
+    const error: any = new Error(`抓取任务进行中：${activeScrapeJob.scope} ${activeScrapeJob.date}`);
+    error.statusCode = 409;
+    error.details = activeScrapeJob;
+    throw error;
+  }
+
+  activeScrapeJob = { startedAt: Date.now(), scope, date };
+  try {
+    return await runner();
+  } finally {
+    activeScrapeJob = null;
+  }
+}
+
+async function handleScrapeRequest(res: express.Response, scope: string, date: string, runner: () => Promise<any>) {
+  try {
+    const result = await runScrapeWithLock(scope, date, runner);
+    res.json(scope === "all" ? { success: true, ...result } : result);
+  } catch (err: any) {
+    if (err?.statusCode === 409) {
+      return res.status(409).json({ error: err.message, active_job: err.details });
+    }
+    res.status(400).json({ error: err?.message || "抓取失败" });
+  }
+}
+
+// Admin: Scrape matches for a date
+router.post("/scrape", authenticate, requireAdmin, async (req, res) => {
+  const { date } = req.body; // format: YYYYMMDD
+  if (!date) return res.status(400).json({ error: "Date is required" });
+  await handleScrapeRequest(res, "football", date, () => scrapeMatches(date));
+});
+
+router.post("/scrape-cba", authenticate, requireAdmin, async (req, res) => {
+  const { date } = req.body;
+  if (!date) return res.status(400).json({ error: "Date is required" });
+  await handleScrapeRequest(res, "cba", date, () => scrapeCba(date));
+});
+
+router.post("/scrape-nba", authenticate, requireAdmin, async (req, res) => {
+  const { date } = req.body;
+  if (!date) return res.status(400).json({ error: "Date is required" });
+  await handleScrapeRequest(res, "nba", date, () => scrapeNba(date));
+});
+
+router.post("/scrape-kbl", authenticate, requireAdmin, async (req, res) => {
+  const { date } = req.body;
+  if (!date) return res.status(400).json({ error: "Date is required" });
+  await handleScrapeRequest(res, "kbl", date, () => scrapeKbl(date));
+});
+
+router.post("/scrape-nbl", authenticate, requireAdmin, async (req, res) => {
+  const { date } = req.body;
+  if (!date) return res.status(400).json({ error: "Date is required" });
+  await handleScrapeRequest(res, "nbl", date, () => scrapeNbl(date));
+});
+
+router.post("/scrape-all", authenticate, requireAdmin, async (req, res) => {
+  const { date } = req.body;
+  if (!date) return res.status(400).json({ error: "Date is required" });
+  await handleScrapeRequest(res, "all", date, () => scrapeAllCategories(date));
+});
+
+// Admin: Get fetch jobs
+router.get("/jobs", authenticate, requireAdmin, (_req, res) => {
+  const jobs = db.prepare("SELECT * FROM fetch_jobs ORDER BY created_at DESC LIMIT 50").all();
+  res.json(jobs);
+});
+
+router.get("/latest-date", authenticate, (req, res) => {
+  const category = String(req.query?.category || "").trim();
+  if (!category) return res.status(400).json({ error: "category is required" });
+
+  const row = db.prepare(`
+    SELECT MAX(match_date) AS latest_date
+    FROM matches
+    WHERE category = ?
+  `).get(category) as { latest_date?: string | null } | undefined;
+
+  res.json({ category, latest_date: row?.latest_date || null });
+});
+
+// Get matches (Admin sees all, Anchor sees open)
+router.get("/", authenticate, async (req: any, res) => {
+  const { date, start_date, end_date, league, category, is_open } = req.query;
+  const normalizedCategory = String(category || "").trim();
+
+  let footballImportantKeys: string[] | null = null;
+  let footballImportantFetchFailed = false;
+  if (normalizedCategory === "足球" && date && !start_date && !end_date) {
+    try {
+      footballImportantKeys = (await getFootballImportantRows(String(date).trim())).map((row) => row.source_match_key);
+    } catch (error) {
+      console.error("Failed to fetch football important rows:", error);
+      footballImportantFetchFailed = true;
+      footballImportantKeys = null;
+    }
+  }
+
+  let query = `
+    SELECT
+      m.*,
+      COALESCE((SELECT COUNT(1) FROM applications ap WHERE ap.match_id = m.id), 0) AS application_count,
+      COALESCE((SELECT COUNT(1) FROM applications ap WHERE ap.match_id = m.id AND ap.status = 'approved'), 0) AS approved_count,
+      COALESCE((SELECT COUNT(1) FROM applications ap WHERE ap.match_id = m.id AND ap.status = 'pending'), 0) AS pending_count,
+      COALESCE((SELECT COUNT(1) FROM assignments a WHERE a.match_id = m.id), 0) AS assignment_count,
+      COALESCE((SELECT COUNT(1) FROM assignments a WHERE a.match_id = m.id AND a.status = 'scheduled'), 0) AS scheduled_assignment_count,
+      COALESCE((SELECT COUNT(1) FROM assignments a WHERE a.match_id = m.id AND a.status = 'completed'), 0) AS completed_assignment_count
+    FROM matches m
+    WHERE 1=1
+  `;
+  const params: any[] = [];
+
+  if (start_date && end_date) {
+    query += " AND m.match_date >= ? AND m.match_date <= ?";
+    params.push(start_date, end_date);
+  } else if (date) {
+    if (footballImportantKeys) {
+      if (footballImportantKeys.length === 0) {
+        return res.json([]);
+      }
+      const placeholders = footballImportantKeys.map(() => "?").join(", ");
+      query += ` AND m.source_match_key IN (${placeholders})`;
+      params.push(...footballImportantKeys);
+    } else {
+      query += " AND m.match_date = ?";
+      params.push(date);
+    }
+  }
+  if (league) {
+    query += " AND m.league_name = ?";
+    params.push(league);
+  }
+  if (normalizedCategory) {
+    query += " AND m.category = ?";
+    params.push(normalizedCategory);
+  }
+  // Anchor users only see open matches
+  const isAdmin = ["admin", "super_admin", "total_admin"].includes(req.user?.role);
+  if (!isAdmin) {
+    query += " AND m.is_open = 1";
+  }
+  if (is_open === "1") {
+    query += " AND m.is_open = 1";
+  } else if (is_open === "0") {
+    query += " AND m.is_open = 0";
+  }
+
+  let matches = db.prepare(query).all(...params) as any[];
+
+  if (normalizedCategory === "足球" && footballImportantFetchFailed && date && !start_date && !end_date) {
+    const enabledLeagues = db.prepare(`
+      SELECT league_name
+      FROM league_configs
+      WHERE is_enabled = 1
+    `).all() as Array<{ league_name: string }>;
+    const enabledSet = new Set(enabledLeagues.map((row) => String(row.league_name || "").trim()).filter(Boolean));
+    if (enabledSet.size > 0) {
+      matches = matches.filter((row) => enabledSet.has(String(row.league_name || "").trim()));
+    }
+  }
+
+  matches = dedupeVisibleMatches(matches)
+    .sort(compareMatchesBusinessAsc)
+    .map((row) => {
+      const requiredAnchorCount = Math.max(1, Number(row.required_anchor_count || 1));
+      const scheduledAssignmentCount = Number(row.scheduled_assignment_count || 0);
+      return {
+        ...row,
+        coverage_gap: Math.max(0, requiredAnchorCount - scheduledAssignmentCount),
+        has_coverage_gap: scheduledAssignmentCount < requiredAnchorCount,
+      };
+    });
+  res.json(matches);
+});
+
+// Admin: Get hot leagues
+router.get("/leagues/hot", authenticate, requireAdmin, (_req, res) => {
+  const rows = db.prepare(`
+    SELECT league_name FROM league_configs
+    WHERE is_enabled = 1
+    ORDER BY sort_order ASC, id ASC
+  `).all() as any[];
+  res.json(rows.map((r) => r.league_name));
+});
+
+router.get("/scrape-scope", authenticate, requireAdmin, (_req, res) => {
+  res.json(getFootballLeagueScopeStats());
+});
+
+// Admin: Add hot league
+router.post("/leagues/hot", authenticate, requireAdmin, (req, res) => {
+  const league_name = String(req.body?.league_name || "").trim();
+  if (!league_name) return res.status(400).json({ error: "league_name is required" });
+
+  const exists = db.prepare("SELECT id FROM league_configs WHERE league_name = ?").get(league_name) as any;
+  if (exists) {
+    db.prepare("UPDATE league_configs SET is_enabled = 1 WHERE id = ?").run(exists.id);
+    return res.json({ success: true, reused: true });
+  }
+
+  const maxRow = db.prepare("SELECT COALESCE(MAX(sort_order), 0) AS max_sort FROM league_configs").get() as any;
+  db.prepare("INSERT INTO league_configs (league_name, is_enabled, sort_order) VALUES (?, 1, ?)").run(league_name, Number(maxRow?.max_sort || 0) + 1);
+  res.json({ success: true });
+});
+
+// Admin: Remove hot league
+router.delete("/leagues/hot", authenticate, requireAdmin, (req, res) => {
+  const league_name = String(req.body?.league_name || "").trim();
+  if (!league_name) return res.status(400).json({ error: "league_name is required" });
+  db.prepare("UPDATE league_configs SET is_enabled = 0 WHERE league_name = ?").run(league_name);
+  res.json({ success: true });
+});
+
+const updateMatchStatement = db.prepare(`
+  UPDATE matches 
+  SET is_open = ?, required_anchor_count = ?, apply_deadline = ?, priority = ?, admin_note = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`);
+
+function buildMatchUpdatePlan(matchId: number, patch: {
+  is_open: unknown;
+  required_anchor_count?: unknown;
+  apply_deadline?: unknown;
+  priority?: unknown;
+  admin_note?: unknown;
+}) {
+  const match = db.prepare(`
+    SELECT id, match_date, kickoff_time, required_anchor_count, apply_deadline, priority, admin_note
+    FROM matches
+    WHERE id = ?
+  `).get(matchId) as any;
+
+  if (!match) {
+    const error: any = new Error(`match ${matchId} not found`);
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const requiredSource = patch.required_anchor_count ?? match.required_anchor_count ?? 1;
+  const normalizedRequired = Math.max(1, Number(requiredSource || 1));
+  const nextOpen = Boolean(patch.is_open);
+  const deadlineSource = typeof patch.apply_deadline === "string" ? patch.apply_deadline : match.apply_deadline;
+  const trimmedDeadline = typeof deadlineSource === "string" ? deadlineSource.trim() : "";
+  const finalDeadline = trimmedDeadline || (nextOpen ? deriveDefaultApplyDeadline(match) : null);
+  const priority = typeof patch.priority === "string" && patch.priority.trim() ? patch.priority.trim() : (match.priority || "normal");
+  const adminNoteSource = patch.admin_note !== undefined ? patch.admin_note : match.admin_note;
+  const adminNote = typeof adminNoteSource === "string" ? adminNoteSource : (adminNoteSource || null);
+  const kickoff = parseMatchKickoff(match.match_date, match.kickoff_time);
+
+  if (nextOpen && !finalDeadline) {
+    const error: any = new Error(`match ${matchId}: 无法推导报名截止时间，请先补全开赛时间后再开放报名`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (finalDeadline && kickoff) {
+    const deadlineDate = new Date(finalDeadline);
+    if (Number.isNaN(deadlineDate.getTime())) {
+      const error: any = new Error(`match ${matchId}: 报名截止时间格式无效`);
+      error.statusCode = 400;
+      throw error;
+    }
+    if (deadlineDate.getTime() > kickoff.getTime()) {
+      const error: any = new Error(`match ${matchId}: 报名截止时间不能晚于开赛时间`);
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+
+  return {
+    matchId,
+    nextOpen,
+    normalizedRequired,
+    finalDeadline: finalDeadline || null,
+    priority,
+    adminNote,
+  };
+}
+
+function applyMatchUpdatePlan(plan: {
+  matchId: number;
+  nextOpen: boolean;
+  normalizedRequired: number;
+  finalDeadline: string | null;
+  priority: string;
+  adminNote: string | null;
+}) {
+  updateMatchStatement.run(
+    plan.nextOpen ? 1 : 0,
+    plan.normalizedRequired,
+    plan.finalDeadline,
+    plan.priority,
+    plan.adminNote,
+    plan.matchId,
+  );
+}
+
+router.put("/batch-open-state", authenticate, requireAdmin, (req, res) => {
+  const ids: number[] = Array.from(new Set((Array.isArray(req.body?.ids) ? req.body.ids : [])
+    .map((value: unknown) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0)));
+  const nextOpen = Boolean(req.body?.is_open);
+
+  if (ids.length === 0) {
+    return res.status(400).json({ error: "ids is required" });
+  }
+
+  try {
+    const plans = ids.map((matchId) => buildMatchUpdatePlan(matchId, { is_open: nextOpen }));
+    const tx = db.transaction((items: typeof plans) => {
+      for (const plan of items) applyMatchUpdatePlan(plan);
+    });
+    tx(plans);
+    logAdminAction({
+      actorUserId: (req as any).user?.id,
+      action: "match.batch_open_state",
+      targetType: "match_batch",
+      targetId: String(plans.length),
+      summary: `${nextOpen ? "批量开启" : "批量关闭"}报名 ${plans.length} 场`,
+      detail: { ids, nextOpen, applyDeadlines: Object.fromEntries(plans.map((plan) => [plan.matchId, plan.finalDeadline])) },
+    });
+
+    res.json({
+      success: true,
+      success_ids: plans.map((plan) => plan.matchId),
+      failed_ids: [],
+      apply_deadlines: Object.fromEntries(plans.map((plan) => [plan.matchId, plan.finalDeadline])),
+    });
+  } catch (err: any) {
+    res.status(err?.statusCode || 400).json({ error: err.message, success_ids: [], failed_ids: ids });
+  }
+});
+
+// Admin: Update match (open/close, set requirements)
+router.put("/:id", authenticate, requireAdmin, (req, res) => {
+  const { is_open, required_anchor_count, apply_deadline, priority, admin_note } = req.body;
+  const matchId = Number(req.params.id);
+
+  try {
+    const plan = buildMatchUpdatePlan(matchId, { is_open, required_anchor_count, apply_deadline, priority, admin_note });
+    applyMatchUpdatePlan(plan);
+    logAdminAction({
+      actorUserId: (req as any).user?.id,
+      action: "match.update",
+      targetType: "match",
+      targetId: matchId,
+      summary: `${plan.nextOpen ? "开启" : "关闭"}报名`,
+      detail: { matchId, required_anchor_count: plan.normalizedRequired, apply_deadline: plan.finalDeadline, priority: plan.priority },
+    });
+    res.json({ success: true, apply_deadline: plan.finalDeadline });
+  } catch (err: any) {
+    res.status(err?.statusCode || 400).json({ error: err.message });
+  }
+});
+
+// Get distinct leagues in DB, optionally filtered by category
+router.get("/leagues", authenticate, async (req, res) => {
+  const category = String(req.query?.category || "").trim();
+  const date = String(req.query?.date || "").trim();
+  const startDate = String(req.query?.start_date || "").trim();
+  const endDate = String(req.query?.end_date || "").trim();
+  const includeCount = String(req.query?.include_count || "").trim() === "1";
+
+  if (category === "足球" && date && !startDate && !endDate) {
+    try {
+      const rows = await getFootballImportantRows(date);
+      const counts = new Map<string, number>();
+      for (const row of rows) {
+        counts.set(row.league_name, (counts.get(row.league_name) || 0) + 1);
+      }
+      const payload = [...counts.entries()]
+        .map(([league_name, match_count]) => ({ league_name, match_count }))
+        .sort((a, b) => b.match_count - a.match_count || a.league_name.localeCompare(b.league_name, "zh-Hans-CN"));
+      return res.json(includeCount ? payload : payload.map((row) => row.league_name));
+    } catch (error) {
+      console.error("Failed to fetch football important leagues:", error);
+    }
+  }
+
+  let query = `
+    SELECT league_name, COUNT(*) AS match_count
+    FROM matches
+    WHERE league_name IS NOT NULL AND TRIM(league_name) <> ''
+  `;
+  const params: any[] = [];
+
+  if (category) {
+    query += ` AND category = ?`;
+    params.push(category);
+  }
+
+  if (startDate && endDate) {
+    query += ` AND match_date >= ? AND match_date <= ?`;
+    params.push(startDate, endDate);
+  } else if (date) {
+    query += ` AND match_date = ?`;
+    params.push(date);
+  }
+
+  query += `
+    GROUP BY league_name
+    ORDER BY match_count DESC, league_name COLLATE NOCASE ASC
+  `;
+
+  const rows = db.prepare(query).all(...params) as Array<{ league_name: string; match_count: number }>;
+  if (includeCount) {
+    return res.json(rows);
+  }
+  res.json(rows.map((row) => row.league_name));
+});
+
+router.get("/teams", authenticate, async (req, res) => {
+  const category = String(req.query?.category || "").trim();
+  if (!category) return res.status(400).json({ error: "category is required" });
+
+  try {
+    const titanBasketballLeagueMap: Record<string, number> = {
+      NBA: 1,
+      韩篮甲: 15,
+    };
+    const titanLeagueId = titanBasketballLeagueMap[category];
+    if (titanLeagueId) {
+      const remoteTeams = await getRemoteTitanBasketballTeams(category, titanLeagueId);
+      if (remoteTeams.length > 0) {
+        return res.json(remoteTeams);
+      }
+    }
+
+    return res.json(getDbTeamsByCategory(category));
+  } catch (err) {
+    console.error("/matches/teams fallback to db failed:", err);
+    return res.json(getDbTeamsByCategory(category));
+  }
+});
+
+export default router;
