@@ -84,16 +84,7 @@ export default function ManageMatches() {
       if (rid !== fetchIdRef.current) return;
       let all: MatchRow[] = Array.isArray(res.data) ? res.data : [];
 
-      // Basketball auto-redirect to latest date
-      if (!dateRange && isBasketball && all.length === 0) {
-        const lr = await api.get(`/matches/latest-date?${catQ}`);
-        if (rid !== fetchIdRef.current) return;
-        const ld = String(lr.data?.latest_date || "").trim();
-        if (ld && ld !== date) {
-          setDate(ld);
-          return; // Will re-trigger via useEffect
-        }
-      }
+
 
       if (rid !== fetchIdRef.current) return;
       setMatches([...all].sort((a, b) => sortDir === "asc" ? compareMatchesBusinessAsc(a, b) : compareMatchesBusinessDesc(a, b)));
