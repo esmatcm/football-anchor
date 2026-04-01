@@ -24,18 +24,18 @@ export default function MainLayout() {
   const [oldPwd, setOldPwd] = useState("");
   const [newPwd, setNewPwd] = useState("");
 
-  if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-
-  const isAdmin = ["admin", "super_admin", "total_admin"].includes(user.role as string);
-  const forceChange = user.role === "anchor" && Number((user as any).must_change_password || 0) === 1;
+  const isAdmin = ["admin", "super_admin", "total_admin"].includes((user?.role ?? "") as string);
+  const forceChange = user?.role === "anchor" && Number((user as any)?.must_change_password || 0) === 1;
 
   useEffect(() => {
     if (forceChange) {
       setChangePwdModal(true);
     }
   }, [forceChange]);
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
 
   const submitChangePassword = async () => {
     if (!oldPwd || !newPwd) return alert("请填写旧密码和新密码");

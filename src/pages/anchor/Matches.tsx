@@ -237,7 +237,7 @@ export default function AvailableMatches() {
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div className="rounded-2xl border border-stone-200 bg-stone-50 px-3 py-2.5">
                     <div className="text-[11px] text-stone-500">开赛时间</div>
-                    <div className="mt-1 font-medium text-stone-900">{match.kickoff_time}</div>
+                    <div className="mt-1 font-medium text-stone-900">{match.kickoff_time === "00:00" ? "时间待定" : match.kickoff_time}</div>
                     <div className="mt-1 text-[11px] text-stone-500">{getKickoffHint(match)}</div>
                   </div>
                   <div className="rounded-2xl border border-stone-200 bg-stone-50 px-3 py-2.5">
@@ -322,7 +322,7 @@ export default function AvailableMatches() {
                         </div>
                       </td>
                       <td className="px-5 py-4 align-top text-sm text-stone-700">
-                        <div className="font-medium text-stone-900">开赛：{match.kickoff_time}</div>
+                        <div className="font-medium text-stone-900">开赛：{match.kickoff_time === "00:00" ? "时间待定" : match.kickoff_time}</div>
                         <div className="mt-1">截止：{formatApplyDeadline(match.apply_deadline)}</div>
                         <div className="mt-2 text-xs text-stone-500">{getKickoffHint(match)}</div>
                       </td>

@@ -14,6 +14,7 @@ const router = express.Router();
 
 let activeScrapeJob: { startedAt: number; scope: string; date: string } | null = null;
 const remoteTeamPoolCache = new Map<string, { expiresAt: number; teams: string[] }>();
+const footballImportantRowsCache = new Map<string, { expiresAt: number; rows: Array<{ source_match_key: string; league_name: string }> }>();
 
 function normalizeIdentityPart(value: unknown) {
   return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -108,14 +109,11 @@ function buildStableSourceMatchKey(match: {
   return `stable_${createHash("sha1").update(identity).digest("hex")}`;
 }
 
-async function getFootballImportantRows(dateStr: string) {
-  const sourceDates = Array.from(new Set([shiftDateYmd(dateStr, -1), dateStr]));
-  const rows: Array<{ source_match_key: string; league_name: string }> = [];
-
-  for (const sourceDate of sourceDates) {
-    const url = `https://bf.titan007.com/football/Next_${sourceDate}.htm`;
+async function fetchOneTitanPage(sourceDate: string): Promise<{ sourceDate: string; html: string } | null> {
+  const url = `https://bf.titan007.com/football/Next_${sourceDate}.htm`;
+  try {
     const response = await axios.get<ArrayBuffer>(url, {
-      timeout: 15000,
+      timeout: 12000,
       responseType: "arraybuffer",
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -123,56 +121,129 @@ async function getFootballImportantRows(dateStr: string) {
         "Accept-Language": "zh-CN,zh;q=0.9",
       },
     });
+    return { sourceDate, html: iconv.decode(Buffer.from(response.data), "gb18030") };
+  } catch {
+    return null;
+  }
+}
 
-    const html = iconv.decode(Buffer.from(response.data), "gb18030");
-    const importantMatch = html.match(/importantSclass\s*=\s*"([^"]*)"/);
-    const importantLeagueIds = new Set(
-      String(importantMatch?.[1] || "")
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean),
-    );
-    const enabledLeagueNames = new Set(getEnabledFootballLeagues());
-    const useLeagueNameFallback = importantLeagueIds.size === 0;
-    const $ = cheerio.load(html);
+function parseTitanPageRows(html: string, sourceDate: string, dateStr: string): Array<{ source_match_key: string; league_name: string }> {
+  const rows: Array<{ source_match_key: string; league_name: string }> = [];
+  const importantMatch = html.match(/importantSclass\s*=\s*"([^"]*)"/);  // eslint-disable-line
+  const importantLeagueIds = new Set(
+    String(importantMatch?.[1] || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+  );
+  const enabledLeagueNames = new Set(getEnabledFootballLeagues());
+  const useLeagueNameFallback = importantLeagueIds.size === 0;
+  const $ = cheerio.load(html);
 
-    $("table tr[id^='tr1_']").each((_, el) => {
-      const leagueId = String($(el).attr("name") || "").split(",")[0].trim();
+  $("table tr[id^='tr1_']").each((_, el) => {
+    const leagueId = String($(el).attr("name") || "").split(",")[0].trim();
+    const cells = $(el).children("td");
+    if (cells.length < 6) return;
 
-      const cells = $(el).children("td");
-      if (cells.length < 6) return;
+    const leagueName = cleanText(cells.eq(0).text());
+    const allowedByImportant = Boolean(leagueId && importantLeagueIds.has(leagueId));
+    const allowedByFallback = Boolean(useLeagueNameFallback && enabledLeagueNames.has(leagueName));
+    if (!allowedByImportant && !allowedByFallback) return;
 
-      const leagueName = cleanText(cells.eq(0).text());
-      const allowedByImportant = Boolean(leagueId && importantLeagueIds.has(leagueId));
-      const allowedByFallback = Boolean(useLeagueNameFallback && enabledLeagueNames.has(leagueName));
-      if (!allowedByImportant && !allowedByFallback) return;
+    const rawKickoffTime = cleanText(cells.eq(1).text());
+    const kickoffTime = rawKickoffTime.replace(/^\d{1,2}-\d{1,2}\s+/, "");  // eslint-disable-line
+    const matchDate = normalizeFootballMatchDate(sourceDate, rawKickoffTime);
+    if (matchDate !== dateStr) return;
 
-      const kickoffTime = cleanText(cells.eq(1).text());
-      const matchDate = normalizeFootballMatchDate(sourceDate, kickoffTime);
-      if (matchDate !== dateStr) return;
+    const homeCell = cells.eq(3).clone();
+    homeCell.find("span[name='order'], font, img").remove();
+    const homeTeam = cleanText(homeCell.text());
+    const awayCell = cells.eq(5).clone();
+    awayCell.find("span[name='order'], font, img").remove();
+    const awayTeam = cleanText(awayCell.text());
+    if (!leagueName || !homeTeam || !awayTeam) return;
 
-      const homeCell = cells.eq(3).clone();
-      homeCell.find("span[name='order'], font, img").remove();
-      const homeTeam = cleanText(homeCell.text());
-      const awayCell = cells.eq(5).clone();
-      awayCell.find("span[name='order'], font, img").remove();
-      const awayTeam = cleanText(awayCell.text());
-      if (!leagueName || !homeTeam || !awayTeam) return;
-
-      rows.push({
-        source_match_key: buildStableSourceMatchKey({
-          match_date: matchDate,
-          kickoff_time: kickoffTime,
-          league_name: leagueName,
-          home_team: homeTeam,
-          away_team: awayTeam,
-        }),
+    rows.push({
+      source_match_key: buildStableSourceMatchKey({
+        match_date: matchDate,
+        kickoff_time: kickoffTime,
         league_name: leagueName,
-      });
+        home_team: homeTeam,
+        away_team: awayTeam,
+      }),
+      league_name: leagueName,
     });
+  });
+  return rows;
+}
+
+async function fetchAndCacheFootballRows(dateStr: string): Promise<Array<{ source_match_key: string; league_name: string }>> {
+  const sourceDates = Array.from(new Set([shiftDateYmd(dateStr, -1), dateStr]));
+  const pages = await Promise.all(sourceDates.map(fetchOneTitanPage));
+  const allRows: Array<{ source_match_key: string; league_name: string }> = [];
+  for (const page of pages) {
+    if (!page) continue;
+    allRows.push(...parseTitanPageRows(page.html, page.sourceDate, dateStr));
+  }
+  const seen = new Set<string>();
+  const rows = allRows.filter((r) => {
+    if (seen.has(r.source_match_key)) return false;
+    seen.add(r.source_match_key);
+    return true;
+  });
+  // Cache for 30 minutes
+  footballImportantRowsCache.set(dateStr, { expiresAt: Date.now() + 30 * 60 * 1000, rows });
+  return rows;
+}
+
+// Promise deduplication: concurrent requests for same date share one fetch
+const footballRowsInFlight = new Map<string, Promise<Array<{ source_match_key: string; league_name: string }>>>();
+
+function evictFootballCache() {
+  if (footballImportantRowsCache.size <= 60) return;
+  const sorted = [...footballImportantRowsCache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+  for (const [k] of sorted.slice(0, 20)) footballImportantRowsCache.delete(k);
+}
+
+function prewarmAdjacent(dateStr: string) {
+  for (const offset of [1, 2, 3, 4, 5, 6, -1]) {
+    const adj = shiftDateYmd(dateStr, offset);
+    const adjCached = footballImportantRowsCache.get(adj);
+    if ((!adjCached || adjCached.expiresAt <= Date.now()) && !footballRowsInFlight.has(adj)) {
+      const p = fetchAndCacheFootballRows(adj).finally(() => footballRowsInFlight.delete(adj));
+      footballRowsInFlight.set(adj, p);
+    }
+  }
+}
+
+async function getFootballImportantRows(dateStr: string) {
+  const cached = footballImportantRowsCache.get(dateStr);
+  if (cached && cached.expiresAt > Date.now()) {
+    prewarmAdjacent(dateStr);
+    return cached.rows;
   }
 
-  return rows;
+  // Stale-while-revalidate: return stale data immediately + refresh in background
+  if (cached && cached.rows.length > 0) {
+    if (!footballRowsInFlight.has(dateStr)) {
+      const p = fetchAndCacheFootballRows(dateStr).finally(() => footballRowsInFlight.delete(dateStr));
+      footballRowsInFlight.set(dateStr, p);
+    }
+    prewarmAdjacent(dateStr);
+    return cached.rows;
+  }
+
+  // Concurrent deduplication: join existing in-flight Promise if one exists
+  if (footballRowsInFlight.has(dateStr)) {
+    return footballRowsInFlight.get(dateStr)!;
+  }
+
+  // Cold start: fire pre-warm + this fetch simultaneously
+  prewarmAdjacent(dateStr);
+  evictFootballCache();
+  const p = fetchAndCacheFootballRows(dateStr).finally(() => footballRowsInFlight.delete(dateStr));
+  footballRowsInFlight.set(dateStr, p);
+  return p;
 }
 
 function buildBasketballSeason(date = new Date()) {
@@ -233,14 +304,49 @@ function assertSafeTitanTeamPayload(payload: string) {
   if (!/\barrTeam\b/.test(text)) throw new Error("Titan team payload missing arrTeam");
 }
 
+const remoteTeamPoolRefreshing = new Set<string>();
+
 async function getRemoteTitanBasketballTeams(category: string, leagueId: number) {
   const season = buildBasketballSeason();
   const cacheKey = `${category}:${season}`;
   const cached = remoteTeamPoolCache.get(cacheKey);
+
+  // Cache hit (still fresh): return immediately
   if (cached && cached.expiresAt > Date.now()) {
     return cached.teams;
   }
 
+  // Stale-while-revalidate: if cache exists but stale, return stale data and refresh in background
+  if (cached && cached.teams.length > 0 && !remoteTeamPoolRefreshing.has(cacheKey)) {
+    remoteTeamPoolRefreshing.add(cacheKey);
+    void (async () => {
+      try {
+        await refreshTitanBasketballTeams(category, leagueId, cacheKey);
+      } finally {
+        remoteTeamPoolRefreshing.delete(cacheKey);
+      }
+    })();
+    return cached.teams;
+  }
+
+  // No cache at all: fetch synchronously (first time only), fall back to DB on error
+  if (!remoteTeamPoolRefreshing.has(cacheKey)) {
+    remoteTeamPoolRefreshing.add(cacheKey);
+    try {
+      return await refreshTitanBasketballTeams(category, leagueId, cacheKey);
+    } catch {
+      return getDbTeamsByCategory(category);
+    } finally {
+      remoteTeamPoolRefreshing.delete(cacheKey);
+    }
+  }
+
+  // Already refreshing: return DB teams as fallback
+  return getDbTeamsByCategory(category);
+}
+
+async function refreshTitanBasketballTeams(category: string, leagueId: number, cacheKey: string): Promise<string[]> {
+  const season = buildBasketballSeason();
   const year = new Date().getUTCFullYear();
   const month = new Date().getUTCMonth() + 1;
   const url = `https://nba.titan007.com/jsData/matchResult/${season}/l${leagueId}_1_${year}_${month}.js?version=${year}${String(month).padStart(2, "0")}1700`;
@@ -263,7 +369,7 @@ async function getRemoteTitanBasketballTeams(category: string, leagueId: number)
 
   if (teams.length > 0) {
     remoteTeamPoolCache.set(cacheKey, {
-      expiresAt: Date.now() + 30 * 60 * 1000,
+      expiresAt: Date.now() + 6 * 60 * 60 * 1000,  // 6h cache
       teams,
     });
   }
@@ -392,7 +498,9 @@ router.get("/", authenticate, async (req: any, res) => {
   } else if (date) {
     if (footballImportantKeys) {
       if (footballImportantKeys.length === 0) {
-        return res.json([]);
+        // titan007 returned no matches for this date (far future / network issue)
+        // Fall back to plain DB date query instead of returning empty
+        footballImportantKeys = null;
       }
       const placeholders = footballImportantKeys.map(() => "?").join(", ");
       query += ` AND m.source_match_key IN (${placeholders})`;

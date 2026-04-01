@@ -187,6 +187,7 @@ function reconcileMatchesForDate(category: string, matchDate: string, sourceMatc
         WHERE match_date = ?
           AND COALESCE(category, '足球') = '足球'
           AND COALESCE(match_status, '') NOT IN ('完', '完场', '已结束')
+          AND COALESCE(is_open, 0) = 0
           AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.match_id = matches.id)
           AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.match_id = matches.id)
       `).run(matchDate);
@@ -199,6 +200,7 @@ function reconcileMatchesForDate(category: string, matchDate: string, sourceMatc
       WHERE match_date = ?
         AND COALESCE(category, '足球') = '足球'
         AND COALESCE(match_status, '') NOT IN ('完', '完场', '已结束')
+        AND COALESCE(is_open, 0) = 0
         AND source_match_key NOT IN (${placeholders})
         AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.match_id = matches.id)
         AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.match_id = matches.id)
@@ -212,6 +214,7 @@ function reconcileMatchesForDate(category: string, matchDate: string, sourceMatc
       WHERE match_date = ?
         AND category = ?
         AND COALESCE(match_status, '') NOT IN ('完', '完场', '已结束')
+        AND COALESCE(is_open, 0) = 0
         AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.match_id = matches.id)
         AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.match_id = matches.id)
     `).run(matchDate, normalizedCategory);
@@ -224,6 +227,7 @@ function reconcileMatchesForDate(category: string, matchDate: string, sourceMatc
     WHERE match_date = ?
       AND category = ?
       AND COALESCE(match_status, '') NOT IN ('完', '完场', '已结束')
+      AND COALESCE(is_open, 0) = 0
       AND source_match_key NOT IN (${placeholders})
       AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.match_id = matches.id)
       AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.match_id = matches.id)
@@ -522,7 +526,9 @@ export async function scrapeMatches(dateStr: string) {
         if (cells.length < 6) return;
 
         const leagueName = cleanText(cells.eq(0).text());
-        const kickoffTime = cleanText(cells.eq(1).text());
+        const rawKickoffTime = cleanText(cells.eq(1).text());
+        // Normalize: strip date prefix (e.g. "3-28 00:00" -> "00:00")
+        const kickoffTime = rawKickoffTime.replace(/^\d{1,2}-\d{1,2}\s+/, "");
         const matchStatus = cleanText(cells.eq(2).text()) || "未开赛";
         const leagueId = String($(el).attr("name") || "").split(",")[0].trim();
 
@@ -534,7 +540,7 @@ export async function scrapeMatches(dateStr: string) {
         awayCell.find("span[name='order'], font, img").remove();
         const awayTeam = cleanText(awayCell.text());
 
-        const matchDate = normalizeMatchDate(sourceDate, kickoffTime);
+        const matchDate = normalizeMatchDate(sourceDate, rawKickoffTime);
         if (matchDate !== dateStr) return;
 
         const allowedByImportant = Boolean(leagueId && importantLeagueIds.has(leagueId));

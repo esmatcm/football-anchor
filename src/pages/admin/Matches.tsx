@@ -51,48 +51,36 @@ export default function ManageMatches() {
   const showMatchDate = Boolean(dateRange);
   const filterItems = isBasketball ? selectedTeams : selectedLeagues;
 
-  // Combined fetch: leagues + matches in one call to avoid race conditions
+  // All requests fire in parallel: leagues + teams (optional) + matches
   const fetchAll = useCallback(async (opts?: { skipLeagues?: boolean }) => {
     const rid = ++fetchIdRef.current;
     const catQ = `category=${encodeURIComponent(category)}`;
     const dq = dateRange ? `start_date=${dateRange.start}&end_date=${dateRange.end}` : `date=${date}`;
 
-    // Fetch leagues (unless skipped)
-    if (!opts?.skipLeagues) {
-      setLeaguesLoading(true);
-      try {
-        const leaguePromise = api.get(`/matches/leagues?${catQ}&${dq}&include_count=1`);
-        const teamPromise = isBasketball ? api.get(`/matches/teams?${catQ}`) : null;
-        const [leagueRes, teamRes] = await Promise.all([leaguePromise, teamPromise]);
-        if (rid !== fetchIdRef.current) return;
-        setLeagues(Array.isArray(leagueRes.data) ? leagueRes.data : []);
-        setTeamPool(teamRes ? (Array.isArray(teamRes.data) ? teamRes.data : []) : []);
-      } catch {
-        if (rid !== fetchIdRef.current) return;
-        setLeagues([]);
-        setTeamPool([]);
-      } finally {
-        if (rid === fetchIdRef.current) setLeaguesLoading(false);
-      }
-    }
-
-    // Fetch matches
+    if (!opts?.skipLeagues) setLeaguesLoading(true);
     setLoading(true);
-    try {
-      let q = `/matches?${dq}&${catQ}`;
-      let res = await api.get(q);
-      if (rid !== fetchIdRef.current) return;
-      let all: MatchRow[] = Array.isArray(res.data) ? res.data : [];
 
+    const leaguePromise = !opts?.skipLeagues
+      ? api.get(`/matches/leagues?${catQ}&${dq}&include_count=1`).catch(() => null)
+      : Promise.resolve(null);
+    const teamPromise = (!opts?.skipLeagues && isBasketball)
+      ? api.get(`/matches/teams?${catQ}`).catch(() => null)
+      : Promise.resolve(null);
+    const matchPromise = api.get(`/matches?${dq}&${catQ}`).catch(() => null);
 
+    const [leagueRes, teamRes, matchRes] = await Promise.all([leaguePromise, teamPromise, matchPromise]);
 
-      if (rid !== fetchIdRef.current) return;
-      setMatches([...all].sort((a, b) => sortDir === "asc" ? compareMatchesBusinessAsc(a, b) : compareMatchesBusinessDesc(a, b)));
-    } catch {
-      if (rid === fetchIdRef.current) setMatches([]);
-    } finally {
-      if (rid === fetchIdRef.current) setLoading(false);
+    if (rid !== fetchIdRef.current) return;
+
+    if (!opts?.skipLeagues) {
+      setLeagues(leagueRes && Array.isArray(leagueRes.data) ? leagueRes.data : []);
+      setTeamPool(teamRes && Array.isArray(teamRes.data) ? teamRes.data : []);
+      setLeaguesLoading(false);
     }
+
+    const all: MatchRow[] = matchRes && Array.isArray(matchRes.data) ? matchRes.data : [];
+    setMatches([...all].sort((a, b) => sortDir === "asc" ? compareMatchesBusinessAsc(a, b) : compareMatchesBusinessDesc(a, b)));
+    setLoading(false);
   }, [category, date, dateRange, sortDir, isBasketball]);
 
   // Fetch all when key params change
@@ -315,7 +303,7 @@ export default function ManageMatches() {
                       <tr key={m.id} className={"align-top transition " + (sel ? "bg-stone-50" : "hover:bg-stone-50/50")}>
                         <td className="px-3 py-3"><input type="checkbox" checked={sel} disabled={ended} onChange={() => setSelectedIds((p) => sel ? p.filter((x) => x !== Number(m.id)) : [...p, Number(m.id)])} className="h-4 w-4 rounded border-stone-300" /></td>
                         <td className="px-3 py-3">
-                          <div className="font-semibold text-stone-900">{showMatchDate ? `${String(m.match_date || "").slice(4, 6)}-${String(m.match_date || "").slice(6)} ` : ""}{m.kickoff_time || "--"}</div>
+                          <div className="font-semibold text-stone-900">{showMatchDate ? `${String(m.match_date || "").slice(4, 6)}-${String(m.match_date || "").slice(6)} ` : ""}{m.kickoff_time === "00:00" ? "时间待定" : (m.kickoff_time || "--")}</div>
                           <div className="mt-1"><span className={"chip " + sig.businessStatusClass}>{sig.businessStatus}</span></div>
                         </td>
                         <td className="px-3 py-3">
@@ -357,7 +345,7 @@ export default function ManageMatches() {
                       <input type="checkbox" checked={sel} disabled={ended} onChange={() => setSelectedIds((p) => sel ? p.filter((x) => x !== Number(m.id)) : [...p, Number(m.id)])} className="mt-1 h-5 w-5 rounded border-stone-300" />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">
-                          <span className="font-medium text-stone-700">{m.kickoff_time || "--"}</span>
+                          <span className="font-medium text-stone-700">{m.kickoff_time === "00:00" ? "时间待定" : (m.kickoff_time || "--")}</span>
                           <span className={"chip " + sig.businessStatusClass}>{sig.businessStatus}</span>
                           <span className="chip chip-neutral">{m.category || "足球"}</span>
                         </div>
