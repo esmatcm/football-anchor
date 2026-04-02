@@ -594,7 +594,7 @@ function buildMatchUpdatePlan(matchId: number, patch: {
   const nextOpen = Boolean(patch.is_open);
   const deadlineSource = typeof patch.apply_deadline === "string" ? patch.apply_deadline : match.apply_deadline;
   const trimmedDeadline = typeof deadlineSource === "string" ? deadlineSource.trim() : "";
-  const finalDeadline = trimmedDeadline || (nextOpen ? deriveDefaultApplyDeadline(match) : null);
+  const finalDeadline = trimmedDeadline || deriveDefaultApplyDeadline(match);
   const priority = typeof patch.priority === "string" && patch.priority.trim() ? patch.priority.trim() : (match.priority || "normal");
   const adminNoteSource = patch.admin_note !== undefined ? patch.admin_note : match.admin_note;
   const adminNote = typeof adminNoteSource === "string" ? adminNoteSource : (adminNoteSource || null);

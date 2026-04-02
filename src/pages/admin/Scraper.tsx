@@ -140,6 +140,50 @@ export default function ScrapeMatches() {
           <span className="chip chip-open">重复抓取只更新，不重复暴露</span>
         </div>
 
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <span className="text-xs font-medium text-stone-500">目标站核对 ↗</span>
+          <a
+            href={`https://bf.titan007.com/football/Next_${date}.htm`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition hover:bg-blue-100 hover:border-blue-300"
+          >
+            ⚽ 足球 · titan007
+          </a>
+          <a
+            href="https://nba.titan007.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs font-medium text-orange-700 transition hover:bg-orange-100 hover:border-orange-300"
+          >
+            🏀 NBA · titan007
+          </a>
+          <a
+            href="https://nba.titan007.com/cn/CBAMatch.aspx"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-purple-200 bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-700 transition hover:bg-purple-100 hover:border-purple-300"
+          >
+            🏀 CBA · titan007
+          </a>
+          <a
+            href="https://nba.titan007.com/cn/League/15.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-teal-200 bg-teal-50 px-3 py-1.5 text-xs font-medium text-teal-700 transition hover:bg-teal-100 hover:border-teal-300"
+          >
+            🏀 韩篮甲 · titan007
+          </a>
+          <a
+            href="https://nba.titan007.com/cn/League/14.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700 transition hover:bg-rose-100 hover:border-rose-300"
+          >
+            🏀 NBL · titan007
+          </a>
+        </div>
+
         {result ? (
           <div className={`rounded-2xl border px-4 py-4 text-sm ${result.success ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-700"}`}>
             {result.success ? (

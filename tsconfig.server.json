@@ -6,7 +6,7 @@
     "sourceMap": false,
     "allowImportingTsExtensions": false
   },
-  "include": [
+  "include": ["src/lib/**/*.ts",
     "server.ts",
     "src/server/**/*.ts"
   ]

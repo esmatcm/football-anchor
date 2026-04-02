@@ -4,6 +4,12 @@ import iconv from "iconv-lite";
 import { createHash } from "crypto";
 import { db } from "./db.js";
 import { getEnabledFootballLeagues } from "./footballLeagues.js";
+import { parseMatchKickoff } from "../lib/matchTime.js";
+function deriveApplyDeadline(matchDate: string, kickoffTime: string): string | null {
+  const kickoff = parseMatchKickoff(matchDate, kickoffTime);
+  if (!kickoff) return null;
+  return new Date(kickoff.getTime() - 30 * 60 * 1000).toISOString();
+}
 
 function cleanText(value: string) {
   return value.replace(/\s+/g, " ").replace(/\[[^\]]+\]/g, "").trim();
@@ -291,9 +297,10 @@ function upsertBasketballMatches(matches: Array<{
       home_team,
       away_team,
       match_status,
-      category
+      category,
+      apply_deadline
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const normalizedMatches = dedupeIncomingMatches(matches);
@@ -313,6 +320,7 @@ function upsertBasketballMatches(matches: Array<{
             match.away_team,
           ) as { id: number } | undefined);
 
+      const deadline = deriveApplyDeadline(match.match_date, match.kickoff_time);
       if (existingByNatural?.id) {
         updateByIdStmt.run(
           match.source_url,
@@ -326,6 +334,8 @@ function upsertBasketballMatches(matches: Array<{
           match.category,
           existingByNatural.id,
         );
+        // Backfill deadline if missing
+        db.prepare("UPDATE matches SET apply_deadline = ? WHERE id = ? AND apply_deadline IS NULL").run(deadline, existingByNatural.id);
       } else {
         insertStmt.run(
           match.source_url,
@@ -337,6 +347,7 @@ function upsertBasketballMatches(matches: Array<{
           match.away_team,
           match.match_status,
           match.category,
+          deadline,
         );
       }
 
@@ -623,8 +634,8 @@ export async function scrapeMatches(dateStr: string) {
     `);
 
     const insertStmt = db.prepare(`
-      INSERT INTO matches (source_url, source_match_key, match_date, kickoff_time, league_name, home_team, away_team, match_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO matches (source_url, source_match_key, match_date, kickoff_time, league_name, home_team, away_team, match_status, apply_deadline)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const normalizedMatches = dedupeIncomingMatches(matches);
@@ -643,8 +654,11 @@ export async function scrapeMatches(dateStr: string) {
               match.away_team,
             ) as { id: number } | undefined);
 
+        const deadline = deriveApplyDeadline(match.match_date, match.kickoff_time);
         if (existing?.id) {
           updateByIdStmt.run(match.source_url, match.source_match_key, match.match_status, existing.id);
+          // Backfill deadline if missing
+          db.prepare("UPDATE matches SET apply_deadline = ? WHERE id = ? AND apply_deadline IS NULL").run(deadline, existing.id);
         } else {
           insertStmt.run(
             match.source_url,
@@ -655,6 +669,7 @@ export async function scrapeMatches(dateStr: string) {
             match.home_team,
             match.away_team,
             match.match_status,
+            deadline,
           );
         }
 
