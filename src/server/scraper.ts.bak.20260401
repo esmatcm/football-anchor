@@ -568,12 +568,7 @@ export async function scrapeMatches(dateStr: string) {
 
     if (matches.length === 0) {
       if (process.env.NODE_ENV === "production" || process.env.ALLOW_MOCK_SCRAPE !== "1") {
-        // No matches on titan007 for this date (normal for far-future dates)
-        db.prepare(`
-          INSERT INTO fetch_jobs (fetch_date, source_url, fetch_status, total_count, success_count)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(dateStr, sourceUrls.join(","), "success", 0, 0);
-        return { success: true, count: 0, total: 0 };
+        throw new Error(`No matches scraped for ${dateStr}; refusing to generate mock data in production mode`);
       }
 
       console.log("No matches found from scraping, generating mock data for " + dateStr);

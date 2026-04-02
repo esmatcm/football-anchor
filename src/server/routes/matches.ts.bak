@@ -178,7 +178,7 @@ function parseTitanPageRows(html: string, sourceDate: string, dateStr: string): 
 }
 
 async function fetchAndCacheFootballRows(dateStr: string): Promise<Array<{ source_match_key: string; league_name: string }>> {
-  const sourceDates = [dateStr]; // Only use the current date page — previous day pages are titan007's own convention and should not leak into next day schedule
+  const sourceDates = Array.from(new Set([shiftDateYmd(dateStr, -1), dateStr]));
   const pages = await Promise.all(sourceDates.map(fetchOneTitanPage));
   const allRows: Array<{ source_match_key: string; league_name: string }> = [];
   for (const page of pages) {

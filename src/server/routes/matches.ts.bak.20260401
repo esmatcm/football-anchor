@@ -178,7 +178,7 @@ function parseTitanPageRows(html: string, sourceDate: string, dateStr: string): 
 }
 
 async function fetchAndCacheFootballRows(dateStr: string): Promise<Array<{ source_match_key: string; league_name: string }>> {
-  const sourceDates = [dateStr]; // Only use the current date page — previous day pages are titan007's own convention and should not leak into next day schedule
+  const sourceDates = Array.from(new Set([shiftDateYmd(dateStr, -1), dateStr]));
   const pages = await Promise.all(sourceDates.map(fetchOneTitanPage));
   const allRows: Array<{ source_match_key: string; league_name: string }> = [];
   for (const page of pages) {
@@ -191,9 +191,8 @@ async function fetchAndCacheFootballRows(dateStr: string): Promise<Array<{ sourc
     seen.add(r.source_match_key);
     return true;
   });
-  // Cache results: 30 min for non-empty, 5 min for empty (far-future dates)
-  const cacheTtl = rows.length > 0 ? 30 * 60 * 1000 : 5 * 60 * 1000;
-  footballImportantRowsCache.set(dateStr, { expiresAt: Date.now() + cacheTtl, rows });
+  // Cache for 30 minutes
+  footballImportantRowsCache.set(dateStr, { expiresAt: Date.now() + 30 * 60 * 1000, rows });
   return rows;
 }
 
@@ -225,12 +224,12 @@ async function getFootballImportantRows(dateStr: string) {
   }
 
   // Stale-while-revalidate: return stale data immediately + refresh in background
-  if (cached) {
+  if (cached && cached.rows.length > 0) {
     if (!footballRowsInFlight.has(dateStr)) {
       const p = fetchAndCacheFootballRows(dateStr).finally(() => footballRowsInFlight.delete(dateStr));
       footballRowsInFlight.set(dateStr, p);
     }
-    if (cached.rows.length > 0) prewarmAdjacent(dateStr);
+    prewarmAdjacent(dateStr);
     return cached.rows;
   }
 
@@ -330,22 +329,20 @@ async function getRemoteTitanBasketballTeams(category: string, leagueId: number)
     return cached.teams;
   }
 
-  // No cache at all: seed cache with DB teams immediately (fast), then refresh from titan007 in background
-  const dbTeams = getDbTeamsByCategory(category);
-  remoteTeamPoolCache.set(cacheKey, { expiresAt: Date.now() + 5 * 60 * 1000, teams: dbTeams });
+  // No cache at all: fetch synchronously (first time only), fall back to DB on error
   if (!remoteTeamPoolRefreshing.has(cacheKey)) {
     remoteTeamPoolRefreshing.add(cacheKey);
-    void (async () => {
-      try {
-        await refreshTitanBasketballTeams(category, leagueId, cacheKey);
-      } catch {
-        // titan007 unreachable — DB teams remain cached, will retry after 5 min TTL
-      } finally {
-        remoteTeamPoolRefreshing.delete(cacheKey);
-      }
-    })();
+    try {
+      return await refreshTitanBasketballTeams(category, leagueId, cacheKey);
+    } catch {
+      return getDbTeamsByCategory(category);
+    } finally {
+      remoteTeamPoolRefreshing.delete(cacheKey);
+    }
   }
-  return dbTeams;
+
+  // Already refreshing: return DB teams as fallback
+  return getDbTeamsByCategory(category);
 }
 
 async function refreshTitanBasketballTeams(category: string, leagueId: number, cacheKey: string): Promise<string[]> {
@@ -354,7 +351,7 @@ async function refreshTitanBasketballTeams(category: string, leagueId: number, c
   const month = new Date().getUTCMonth() + 1;
   const url = `https://nba.titan007.com/jsData/matchResult/${season}/l${leagueId}_1_${year}_${month}.js?version=${year}${String(month).padStart(2, "0")}1700`;
   const response = await axios.get<string>(url, {
-    timeout: 5000,
+    timeout: 15000,
     responseType: "text",
     headers: {
       "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
@@ -499,12 +496,16 @@ router.get("/", authenticate, async (req: any, res) => {
     query += " AND m.match_date >= ? AND m.match_date <= ?";
     params.push(start_date, end_date);
   } else if (date) {
-    if (footballImportantKeys && footballImportantKeys.length > 0) {
+    if (footballImportantKeys) {
+      if (footballImportantKeys.length === 0) {
+        // titan007 returned no matches for this date (far future / network issue)
+        // Fall back to plain DB date query instead of returning empty
+        footballImportantKeys = null;
+      }
       const placeholders = footballImportantKeys.map(() => "?").join(", ");
       query += ` AND m.source_match_key IN (${placeholders})`;
       params.push(...footballImportantKeys);
     } else {
-      // titan007 returned no matches or fetch failed — fall back to plain DB date query
       query += " AND m.match_date = ?";
       params.push(date);
     }
@@ -816,30 +817,4 @@ router.get("/teams", authenticate, async (req, res) => {
   }
 });
 
-
-// Pre-warm caches on module load so first user request is always fast
-void (async () => {
-  try {
-    // Seed NBA/韩篮甲 team caches from DB immediately (no external call)
-    const titanLeagueMap: Record<string, number> = { NBA: 1, "韩篮甲": 15 };
-    for (const cat of Object.keys(titanLeagueMap)) {
-      const season = buildBasketballSeason();
-      const key = `${cat}:${season}`;
-      if (!remoteTeamPoolCache.has(key)) {
-        const teams = getDbTeamsByCategory(cat);
-        if (teams.length > 0) {
-          remoteTeamPoolCache.set(key, { expiresAt: Date.now() + 5 * 60 * 1000, teams });
-        }
-      }
-    }
-    // Pre-warm football important rows for today in background
-    const now = new Date();
-    const bjNow = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-    const y = bjNow.getUTCFullYear();
-    const m = String(bjNow.getUTCMonth() + 1).padStart(2, "0");
-    const d = String(bjNow.getUTCDate()).padStart(2, "0");
-    const todayStr = `${y}${m}${d}`;
-    getFootballImportantRows(todayStr).catch(() => {});
-  } catch {}
-})();
 export default router;
