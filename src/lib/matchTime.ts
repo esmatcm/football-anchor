@@ -209,7 +209,7 @@ export function getMatchAnomalies(match: MatchTimeLike, now = Date.now()) {
   const deadline = parseDateTime(match.apply_deadline);
   const kickoff = parseMatchKickoff(match.match_date, match.kickoff_time);
   const required = Math.max(1, Number(match.required_anchor_count || 1));
-  const assigned = Number(match.assignment_count ?? match.scheduled_assignment_count ?? 0);
+  const assigned = Number(match.scheduled_assignment_count ?? match.assignment_count ?? 0);
 
   if (started && Boolean(match.is_open)) issues.push("已开赛但仍开放");
   if (!ended && Boolean(match.is_open) && !match.apply_deadline) issues.push("开放但缺截止时间");

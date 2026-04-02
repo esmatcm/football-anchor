@@ -11,7 +11,7 @@ const autoCloseReviewMatchesForDate = (date: string) => {
     SELECT m.*,
            COALESCE((SELECT COUNT(1) FROM applications a WHERE a.match_id = m.id), 0) AS application_count
     FROM matches m
-    WHERE m.match_date = ? AND (m.is_open = 1 OR m.apply_deadline IS NOT NULL)
+    WHERE m.match_date = ?
     ORDER BY m.kickoff_time ASC, m.id ASC
   `).all(date) as any[];
 
@@ -57,7 +57,7 @@ const autoCloseReviewMatchesForDate = (date: string) => {
            COALESCE((SELECT COUNT(1) FROM applications a WHERE a.match_id = m.id AND a.status = 'approved'), 0) AS approved_count,
            COALESCE((SELECT COUNT(1) FROM applications a WHERE a.match_id = m.id AND a.status = 'pending'), 0) AS pending_count
     FROM matches m
-    WHERE m.match_date = ? AND (m.is_open = 1 OR m.apply_deadline IS NOT NULL)
+    WHERE m.match_date = ?
     ORDER BY m.kickoff_time ASC, m.id ASC
   `).all(date);
 
@@ -304,7 +304,7 @@ router.get("/day-overview", authenticate, requireAdmin, (req, res) => {
     LEFT JOIN applications ap ON ap.match_id = m.id
     LEFT JOIN anchors an ON ap.anchor_id = an.id
     LEFT JOIN users u ON an.user_id = u.id
-    WHERE m.match_date = ? AND (m.is_open = 1 OR m.apply_deadline IS NOT NULL)
+    WHERE m.match_date = ?
     GROUP BY m.id
     ORDER BY m.kickoff_time ASC
   `).all(date) as any[];

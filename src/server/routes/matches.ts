@@ -465,21 +465,10 @@ router.get("/latest-date", authenticate, (req, res) => {
 });
 
 // Get matches (Admin sees all, Anchor sees open)
+// v1.1.0: Display shows ALL DB matches for the date. titan007 filter only used during scrape/import.
 router.get("/", authenticate, async (req: any, res) => {
   const { date, start_date, end_date, league, category, is_open } = req.query;
   const normalizedCategory = String(category || "").trim();
-
-  let footballImportantKeys: string[] | null = null;
-  let footballImportantFetchFailed = false;
-  if (normalizedCategory === "足球" && date && !start_date && !end_date) {
-    try {
-      footballImportantKeys = (await getFootballImportantRows(String(date).trim())).map((row) => row.source_match_key);
-    } catch (error) {
-      console.error("Failed to fetch football important rows:", error);
-      footballImportantFetchFailed = true;
-      footballImportantKeys = null;
-    }
-  }
 
   let query = `
     SELECT
@@ -499,15 +488,8 @@ router.get("/", authenticate, async (req: any, res) => {
     query += " AND m.match_date >= ? AND m.match_date <= ?";
     params.push(start_date, end_date);
   } else if (date) {
-    if (footballImportantKeys && footballImportantKeys.length > 0) {
-      const placeholders = footballImportantKeys.map(() => "?").join(", ");
-      query += ` AND m.source_match_key IN (${placeholders})`;
-      params.push(...footballImportantKeys);
-    } else {
-      // titan007 returned no matches or fetch failed — fall back to plain DB date query
-      query += " AND m.match_date = ?";
-      params.push(date);
-    }
+    query += " AND m.match_date = ?";
+    params.push(date);
   }
   if (league) {
     query += " AND m.league_name = ?";
@@ -529,18 +511,6 @@ router.get("/", authenticate, async (req: any, res) => {
   }
 
   let matches = db.prepare(query).all(...params) as any[];
-
-  if (normalizedCategory === "足球" && footballImportantFetchFailed && date && !start_date && !end_date) {
-    const enabledLeagues = db.prepare(`
-      SELECT league_name
-      FROM league_configs
-      WHERE is_enabled = 1
-    `).all() as Array<{ league_name: string }>;
-    const enabledSet = new Set(enabledLeagues.map((row) => String(row.league_name || "").trim()).filter(Boolean));
-    if (enabledSet.size > 0) {
-      matches = matches.filter((row) => enabledSet.has(String(row.league_name || "").trim()));
-    }
-  }
 
   matches = dedupeVisibleMatches(matches)
     .sort(compareMatchesBusinessAsc)
@@ -744,22 +714,7 @@ router.get("/leagues", authenticate, async (req, res) => {
   const endDate = String(req.query?.end_date || "").trim();
   const includeCount = String(req.query?.include_count || "").trim() === "1";
 
-  if (category === "足球" && date && !startDate && !endDate) {
-    try {
-      const rows = await getFootballImportantRows(date);
-      const counts = new Map<string, number>();
-      for (const row of rows) {
-        counts.set(row.league_name, (counts.get(row.league_name) || 0) + 1);
-      }
-      const payload = [...counts.entries()]
-        .map(([league_name, match_count]) => ({ league_name, match_count }))
-        .sort((a, b) => b.match_count - a.match_count || a.league_name.localeCompare(b.league_name, "zh-Hans-CN"));
-      return res.json(includeCount ? payload : payload.map((row) => row.league_name));
-    } catch (error) {
-      console.error("Failed to fetch football important leagues:", error);
-    }
-  }
-
+  // v1.1.0: Leagues list now comes from DB only (titan007 filter only used during scrape)
   let query = `
     SELECT league_name, COUNT(*) AS match_count
     FROM matches

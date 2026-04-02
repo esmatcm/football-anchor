@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Outlet, Navigate, NavLink } from "react-router-dom";
 import { useAuthStore } from "../store/authStore";
 import api from "../lib/api";
+import { APP_VERSION } from "../lib/version";
 import {
   LogOut,
   LayoutDashboard,
@@ -141,6 +142,7 @@ export default function MainLayout() {
                 {productBadge}
               </div>
               <h1 className="mt-3 text-[22px] font-bold tracking-[-0.02em] text-stone-900">金银伯直播管理系统</h1>
+              <div className="mt-1 text-[11px] text-stone-400">v{APP_VERSION}</div>
               <p className="mt-2 text-[13px] leading-6 text-stone-500">赛程 · 排班 · 审核 · 统计一站管理</p>
             </div>
             <div className="px-4 py-4">
@@ -227,7 +229,7 @@ export default function MainLayout() {
                 <div className="inline-flex items-center gap-2 rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-[11px] text-stone-600">
                   {productBadge}
                 </div>
-                <h1 className="mt-2 text-[17px] font-semibold tracking-[-0.02em] text-stone-900">金银伯直播管理系统</h1>
+                <h1 className="mt-2 text-[17px] font-semibold tracking-[-0.02em] text-stone-900">金银伯直播管理系统 <span className="text-[11px] font-normal text-stone-400">v{APP_VERSION}</span></h1>
                 <p className="text-[12px] leading-5 text-stone-500">
                   {user.nickname} · {roleLabel}
                 </p>

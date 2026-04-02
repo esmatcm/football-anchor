@@ -1,0 +1,5 @@
+{
+  "name": "Football Anchor Schedule Manager",
+  "description": "A system for managing football match anchor schedules, scraping matches, and handling applications.",
+  "requestFramePermissions": []
+}
