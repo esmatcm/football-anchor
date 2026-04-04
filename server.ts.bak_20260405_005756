@@ -7,7 +7,6 @@ import matchRoutes from "./src/server/routes/matches.js";
 import applicationRoutes from "./src/server/routes/applications.js";
 import statsRoutes from "./src/server/routes/stats.js";
 import { scrapeAllCategories } from "./src/server/scraper.js";
-import { parseMatchKickoff } from "./src/lib/matchTime.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -65,49 +64,7 @@ async function startServer() {
     });
   }
 
-  // ── Auto-complete: mark past-match assignments as completed ──
-  const AUTO_COMPLETE_HOURS = 3; // hours after kickoff to auto-complete
-  const autoCompleteAssignments = () => {
-    try {
-      const scheduled = db.prepare(`
-        SELECT a.id, m.match_date, m.kickoff_time
-        FROM assignments a
-        JOIN matches m ON a.match_id = m.id
-        WHERE a.status = 'scheduled'
-      `).all() as any[];
 
-      const now = Date.now();
-      const threshold = AUTO_COMPLETE_HOURS * 60 * 60 * 1000;
-      let completed = 0;
-
-      const updateStmt = db.prepare(
-        `UPDATE assignments SET status = 'completed' WHERE id = ?`
-      );
-
-      const tx = db.transaction(() => {
-        for (const row of scheduled) {
-          const kickoff = parseMatchKickoff(row.match_date, row.kickoff_time);
-          if (!kickoff) continue;
-          if (now - kickoff.getTime() >= threshold) {
-            updateStmt.run(row.id);
-            completed++;
-          }
-        }
-      });
-      tx();
-
-      if (completed > 0) {
-        console.log(`[AUTO_COMPLETE] completed ${completed} assignments for ended matches`);
-      }
-    } catch (e: any) {
-      console.error(`[AUTO_COMPLETE] error:`, e?.message || e);
-    }
-  };
-
-  // Run immediately on startup, then every 10 minutes
-  autoCompleteAssignments();
-  setInterval(autoCompleteAssignments, 10 * 60 * 1000);
-  console.log(`[AUTO_COMPLETE] enabled: auto-complete assignments ${AUTO_COMPLETE_HOURS}h after kickoff`);
 
   const getAutoScrapeDaysAhead = () => {
     const raw = Number(process.env.AUTO_SCRAPE_DAYS_AHEAD ?? 30);
