@@ -12,8 +12,8 @@ import {
 } from "../../lib/matchTime";
 import { getAdminMatchSignals } from "../../lib/adminMatchUi";
 
-type Category = "足球" | "CBA" | "NBA" | "韩篮甲";
-const CATEGORIES: Category[] = ["足球", "CBA", "NBA", "韩篮甲", "NBL"];
+type Category = "足球" | "CBA" | "NBA" | "韩篮甲" | "NBL" | "新西联";
+const CATEGORIES: Category[] = ["足球", "CBA", "NBA", "韩篮甲", "NBL", "新西联"];
 type MatchRow = any;
 
 function getCoverage(m: MatchRow) {

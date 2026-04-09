@@ -25,7 +25,7 @@ const SITE_COLORS: Record<string, { bg: string; text: string; border: string }> 
   ga: { bg: 'bg-sky-50', text: 'text-sky-700', border: 'border-sky-300' },
 };
 
-const CATEGORIES = ["全部", "足球", "CBA", "NBA", "韩篮甲", "NBL"] as const;
+const CATEGORIES = ["全部", "足球", "CBA", "NBA", "韩篮甲", "NBL", "新西联"] as const;
 
 function getStatusTag(kickoff: string, dateYmd: string) {
   const dt = parseMatchKickoff(dateYmd, kickoff);

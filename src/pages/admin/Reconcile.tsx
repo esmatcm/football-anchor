@@ -16,6 +16,7 @@ export default function DataReconcile() {
       NBA: "/matches/scrape-nba",
       韩篮甲: "/matches/scrape-kbl",
       NBL: "/matches/scrape-nbl",
+      新西联: "/matches/scrape-nznbl",
     };
     const apiPath = pathMap[category] || "/matches/scrape-all";
     try {

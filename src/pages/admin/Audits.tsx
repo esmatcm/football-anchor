@@ -6,7 +6,7 @@ import DateQuickPicker from "../../components/DateQuickPicker";
 import { getBeijingTodayYmd } from "../../lib/beijingDate";
 import { getAdminMatchSignals, getAssignmentStatusChipClass } from "../../lib/adminMatchUi";
 
-const AUDIT_CATEGORIES = ["全部", "足球", "CBA", "NBA", "韩篮甲", "NBL"] as const;
+const AUDIT_CATEGORIES = ["全部", "足球", "CBA", "NBA", "韩篮甲", "NBL", "新西联"] as const;
 type AuditCategoryFilter = (typeof AUDIT_CATEGORIES)[number];
 
 export default function AuditMatches() {

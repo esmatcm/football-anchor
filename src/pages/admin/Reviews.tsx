@@ -4,7 +4,7 @@ import DateQuickPicker from "../../components/DateQuickPicker";
 import { getBeijingTodayYmd } from "../../lib/beijingDate";
 import { getAdminMatchSignals } from "../../lib/adminMatchUi";
 
-const CATEGORIES = ["全部", "足球", "CBA", "NBA", "韩篮甲", "NBL"] as const;
+const CATEGORIES = ["全部", "足球", "CBA", "NBA", "韩篮甲", "NBL", "新西联"] as const;
 type CategoryFilter = (typeof CATEGORIES)[number];
 
 const SITE_COLORS: Record<string, { bg: string; text: string; border: string }> = {

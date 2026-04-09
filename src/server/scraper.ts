@@ -5,6 +5,18 @@ import { createHash } from "crypto";
 import { db } from "./db.js";
 import { getEnabledFootballLeagues } from "./footballLeagues.js";
 import { parseMatchKickoff } from "../lib/matchTime.js";
+
+const TITAN_PROXY_URL = process.env.TITAN_PROXY_URL || "";
+const TITAN_PROXY_KEY = process.env.TITAN_PROXY_KEY || "";
+
+function titanUrl(originalUrl: string): string {
+  if (!TITAN_PROXY_URL) return originalUrl;
+  return `${TITAN_PROXY_URL}?key=${TITAN_PROXY_KEY}&url=${encodeURIComponent(originalUrl)}`;
+}
+
+const scrapeDelay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+const randomDelay = () => scrapeDelay(1000 + Math.random() * 2000);
+
 function deriveApplyDeadline(matchDate: string, kickoffTime: string): string | null {
   const kickoff = parseMatchKickoff(matchDate, kickoffTime);
   if (!kickoff) return null;
@@ -75,6 +87,11 @@ function buildBasketballSeason(dateStr: string) {
   const startYear = month >= 7 ? year : year - 1;
   const endYear = startYear + 1;
   return `${String(startYear).slice(2)}-${String(endYear).slice(2)}`;
+}
+
+function buildCalendarYearSeason(dateStr: string) {
+  const year = Number(dateStr.slice(0, 4));
+  return String(year).slice(2);
 }
 
 function buildBasketballStatus(matchDateTime: string) {
@@ -404,7 +421,9 @@ async function fetchTitanBasketballSource(url: string, dateStr: string, category
     Accept: "*/*",
     "Accept-Language": "zh-CN,zh;q=0.9",
   };
-  const response = await axios.get<string>(url, { timeout: 20000, responseType: "text", headers });
+  await randomDelay();
+  const fetchUrl = titanUrl(url);
+  const response = await axios.get<string>(fetchUrl, { timeout: 20000, responseType: "text", headers: TITAN_PROXY_URL ? {} : headers });
   const payload = String(response.data || "");
 
   // Parse team map - arrTeam exists in both formats
@@ -510,7 +529,9 @@ export async function scrapeMatches(dateStr: string) {
 
     for (const sourceDate of sourceDates) {
       const url = `https://bf.titan007.com/football/Next_${sourceDate}.htm`;
-      const response = await axios.get<ArrayBuffer>(url, {
+      await randomDelay();
+      const fetchUrl = titanUrl(url);
+      const response = await axios.get<ArrayBuffer>(fetchUrl, {
         timeout: 15000,
         responseType: "arraybuffer",
         headers: {
@@ -721,6 +742,42 @@ export async function scrapeNbl(dateStr: string) {
   return await scrapeTitanBasketball(dateStr, 14, "NBL");
 }
 
+export async function scrapeNznbl(dateStr: string) {
+  const year = Number(dateStr.slice(0, 4));
+  const month = Number(dateStr.slice(4, 6));
+  const season = buildCalendarYearSeason(dateStr);
+  const regularUrl = `https://nba.titan007.com/jsData/matchResult/${season}/l145_1_${year}_${month}.js`;
+  const playoffUrl = `https://nba.titan007.com/jsData/matchResult/${season}/l145_2.js`;
+  const urls: string[] = [];
+  try {
+    let allMatches: any[] = [];
+    try {
+      const rm = await fetchTitanBasketballSource(regularUrl, dateStr, "新西联");
+      if (rm.length > 0) allMatches.push(...rm);
+      urls.push(regularUrl);
+    } catch {}
+    try {
+      const pm = await fetchTitanBasketballSource(playoffUrl, dateStr, "新西联", true);
+      if (pm.length > 0) allMatches.push(...pm);
+      urls.push(playoffUrl);
+    } catch {}
+    const seen = new Set<string>();
+    allMatches = allMatches.filter((m) => {
+      if (seen.has(m.source_match_key)) return false;
+      seen.add(m.source_match_key);
+      return true;
+    });
+    const successCount = upsertBasketballMatches(allMatches);
+    const urlStr = urls.join(",") || regularUrl;
+    db.prepare(`INSERT INTO fetch_jobs (fetch_date, source_url, fetch_status, total_count, success_count) VALUES (?, ?, ?, ?, ?)`).run(dateStr, urlStr, "success", allMatches.length, successCount);
+    return { success: true, count: successCount, category: "新西联", date: dateStr, source_url: urlStr };
+  } catch (error: any) {
+    console.error("新西联 scraping error:", error.message);
+    db.prepare(`INSERT INTO fetch_jobs (fetch_date, source_url, fetch_status, fail_reason) VALUES (?, ?, ?, ?)`).run(dateStr, urls.join(",") || regularUrl, "failed", error.message);
+    return { success: false, error: error.message, category: "新西联", date: dateStr, source_url: urls.join(",") || regularUrl };
+  }
+}
+
 export async function scrapeAllCategories(dateStr: string) {
   const settled = await Promise.allSettled([
     scrapeMatches(dateStr),
@@ -728,6 +785,7 @@ export async function scrapeAllCategories(dateStr: string) {
     scrapeNba(dateStr),
     scrapeKbl(dateStr),
     scrapeNbl(dateStr),
+    scrapeNznbl(dateStr),
   ]);
 
   const unwrap = (r: PromiseSettledResult<any>) =>
@@ -738,14 +796,15 @@ export async function scrapeAllCategories(dateStr: string) {
   const nba = unwrap(settled[2]);
   const kbl = unwrap(settled[3]);
   const nbl = unwrap(settled[4]);
+  const nznbl = unwrap(settled[5]);
 
-  const success = Boolean(football?.success && cba?.success && nba?.success && kbl?.success && nbl?.success);
-  const count = Number(football?.count || 0) + Number(cba?.count || 0) + Number(nba?.count || 0) + Number(kbl?.count || 0) + Number(nbl?.count || 0);
+  const success = Boolean(football?.success && cba?.success && nba?.success && kbl?.success && nbl?.success && nznbl?.success);
+  const count = Number(football?.count || 0) + Number(cba?.count || 0) + Number(nba?.count || 0) + Number(kbl?.count || 0) + Number(nbl?.count || 0) + Number(nznbl?.count || 0);
 
   return {
     success,
     count,
     date: dateStr,
-    results: { football, cba, nba, kbl, nbl },
+    results: { football, cba, nba, kbl, nbl, nznbl },
   };
 }

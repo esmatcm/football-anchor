@@ -6,7 +6,7 @@ import { createHash } from "crypto";
 import { db } from "../db.js";
 import { logAdminAction } from "../adminAudit.js";
 import { authenticate, requireAdmin } from "./auth.js";
-import { scrapeMatches, scrapeCba, scrapeNba, scrapeKbl, scrapeNbl, scrapeAllCategories } from "../scraper.js";
+import { scrapeMatches, scrapeCba, scrapeNba, scrapeKbl, scrapeNbl, scrapeNznbl, scrapeAllCategories } from "../scraper.js";
 import { compareMatchesBusinessAsc, parseMatchKickoff } from "../../lib/matchTime.js";
 import { getEnabledFootballLeagues, getFootballLeagueScopeStats } from "../footballLeagues.js";
 
@@ -437,6 +437,12 @@ router.post("/scrape-nbl", authenticate, requireAdmin, async (req, res) => {
   const { date } = req.body;
   if (!date) return res.status(400).json({ error: "Date is required" });
   await handleScrapeRequest(res, "nbl", date, () => scrapeNbl(date));
+});
+
+router.post("/scrape-nznbl", authenticate, requireAdmin, async (req, res) => {
+  const { date } = req.body;
+  if (!date) return res.status(400).json({ error: "Date is required" });
+  await handleScrapeRequest(res, "nznbl", date, () => scrapeNznbl(date));
 });
 
 router.post("/scrape-all", authenticate, requireAdmin, async (req, res) => {

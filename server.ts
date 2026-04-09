@@ -119,7 +119,15 @@ async function startServer() {
     const autoScrapeDaysAhead = getAutoScrapeDaysAhead();
     const runAuto = async () => {
       const base = new Date();
+      const currentHour = base.getHours();
       for (let i = 0; i <= autoScrapeDaysAhead; i++) {
+        // Tiered frequency: reduce requests for far-future dates
+        // +0~+3 days: every round (high priority, imminent matches)
+        // +4~+7 days: every 2 hours (medium priority)
+        // +8~+30 days: every 6 hours (low priority, rarely changes)
+        if (i >= 8 && currentHour % 6 !== 0) continue;
+        if (i >= 4 && i < 8 && currentHour % 2 !== 0) continue;
+
         const dt = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
         const y = dt.getFullYear();
         const m = String(dt.getMonth() + 1).padStart(2, "0");

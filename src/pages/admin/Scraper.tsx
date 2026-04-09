@@ -10,6 +10,7 @@ const SCRAPE_ACTIONS = [
   { key: "nba", label: "抓取 NBA", badge: "篮球月度数据源", className: "btn-secondary", supported: true },
   { key: "kbl", label: "抓取韩篮甲", badge: "SclassID=15 月度数据源", className: "btn-secondary", supported: true },
 { key: "nbl", label: "抓取 NBL", badge: "SclassID=14 澳篮月度数据源", className: "btn-secondary", supported: true },
+{ key: "nznbl", label: "抓取 新西联", badge: "SclassID=145 新西兰篮球月度数据源", className: "btn-secondary", supported: true },
   { key: "all", label: "四类全抓", badge: "串并合并校验", className: "btn-primary", supported: true },
 ] as const;
 
@@ -74,6 +75,8 @@ export default function ScrapeMatches() {
         cba: "/matches/scrape-cba",
         nba: "/matches/scrape-nba",
         kbl: "/matches/scrape-kbl",
+        nbl: "/matches/scrape-nbl",
+        nznbl: "/matches/scrape-nznbl",
         all: "/matches/scrape-all",
       };
       const path = pathMap[type];
